@@ -99,15 +99,10 @@ func (s *Sync) Watch(ctx context.Context) <-chan *Event {
 		if err != nil {
 			select {
 			case responseChan <- &Event{Err: err}:
-			case <- childCtx.Done():
+			default:
 			}
-			return
-		} else {
-			select {
-			case <- childCtx.Done():
-			}
-			return
 		}
+		return
 	}()
 
 	return responseChan
