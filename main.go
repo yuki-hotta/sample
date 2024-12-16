@@ -80,7 +80,10 @@ func (s *Sync) Watch(ctx context.Context) <-chan *Event {
 				select {
 				case <-childCtx.Done():
 					return nil
-				case wresp := <-rch:
+				case wresp, ok := <-rch:
+					if !ok {
+						break
+					}
 					err := wresp.Err()
 					if err != nil {
 						return err
