@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"time"
-
+	syn "sync"
 	"io"
 	"log"
 	"os"
@@ -31,7 +31,8 @@ type Sync struct {
 }
 
 type Event struct{
-	Id int
+	Key string
+	Value string
 	Err error
 }
 
@@ -47,68 +48,100 @@ type Request struct {
 	doneCh chan struct{}
 }
 
-func (s *Sync) clientWatch(ctx context.Context) <-chan Response {
-	watchChan := make(chan Response, 1)
-	go func() {
-		childCtx, cancel := context.WithCancel(ctx)
-		defer cancel()
-		// for {
-			e1 := &Event{Id: 1}
-			e2 :=  &Event{Id: 2}
-			select{
-			case <-childCtx.Done():
-				break
-			case watchChan <- Response{Events: []*Event{e1, e2}}:
-			}
-		// }
-	}()
-	return watchChan
-}
-
 // gohan/syncer/etcdv3/etcd.go
-func (s *Sync) Watch(ctx context.Context) <-chan *Event {
-	responseChan := make(chan *Event, 32)
+func (s *Sync) watch(ctx context.Context, responseChan chan *Event) error {
 
+	childCtx, cancel := context.WithCancel(ctx)
+	errorsCh := make(chan error, 1)
+	var wg syn.WaitGroup
+	wg.Add(1)
 	go func() {
-		defer close(responseChan)
-		childCtx, cancel := context.WithCancel(ctx)
-		defer cancel()
 
-		rch := s.clientWatch(childCtx)
+		defer wg.Done()
 		err := func() error {
+			rch := s.client.Watch(ctx, "/message")
+
 			for {
 				select {
 				case <-childCtx.Done():
 					return nil
-				case wresp, ok := <-rch:
+				case wresp, ok := <- rch:
 					if !ok {
-						break
+						return nil
 					}
 					err := wresp.Err()
 					if err != nil {
 						return err
 					}
-					log.Println(wresp)
 					for _, ev := range wresp.Events {
-						select{
-						case <-childCtx.Done():
-							break
-						case responseChan <- ev:
-						}
+						func() {
+							select {
+							case <-childCtx.Done():
+								return
+							case responseChan <- &Event{
+								Key: string(ev.Kv.Key), 
+								Value: string(ev.Kv.Value),
+							}:
+								return
+							}
+						}()
 					}
 				}
 			}
+
 		}()
-		if err != nil {
-			select {
-			case responseChan <- &Event{Err: err}:
-			default:
-			}
-		}
-		return
+		errorsCh <- err
+	}()
+	defer func() {
+		cancel()
+		wg.Wait()
 	}()
 
-	return responseChan
+	select {
+	case <-childCtx.Done():
+		return nil
+	case err := <-errorsCh:
+		return err
+	}
+}
+
+// Watch keep watch update under the path until context is canceled
+func (s *Sync) Watch(ctx context.Context) <-chan *Event {
+	childCtx, cancel := context.WithCancel(ctx)
+
+	eventCh := make(chan *Event, 32)
+	watchDoneCh := make(chan error, 1)
+	watchFinished := make(chan bool, 1)
+	go func() {
+		watchDoneCh <- s.watch(childCtx, eventCh)
+		watchFinished <- true
+	}()
+	go func() {
+		defer func() {
+			close(eventCh)
+			cancel()
+			select {
+			case <-watchFinished:
+				break
+			}
+			close(watchFinished)
+		}()
+
+		select {
+		case <-childCtx.Done():
+			// don't return without ensuring Watch finished or we risk panic:
+			// send on closed eventCh channel
+			<-watchDoneCh
+		case err := <-watchDoneCh:
+			if err != nil {
+				select {
+				case eventCh <- &Event{Err: err}:
+				default:
+				}
+			}
+		}
+	}()
+	return eventCh
 }
 
 type ISync struct {
@@ -116,25 +149,29 @@ type ISync struct {
 }
 
 type IEvent struct {
-	Id int
+	Key string
+	Value string
 }
 
 // gohan/extension/goplugin/sync.go
 func (syn *ISync) Watch(ctx context.Context, timeout time.Duration) ([]*IEvent, error) {
-	eventChan := syn.raw.Watch(ctx)
-	select {
-	case event, ok := <-eventChan:
-		if event == nil || !ok {
+	childCtx, cancel := context.WithCancel(ctx)
+	goextEvent, err := func() ([]*IEvent, error) {
+		eventChan := syn.raw.Watch(childCtx)
+		select {
+		case event, _ := <-eventChan:
+			return []*IEvent{{
+				Key: event.Key,
+				Value: event.Value,
+			}}, event.Err
+		case <-time.After(timeout):
 			return nil, nil
+		case <-childCtx.Done():
+			return nil, context.Canceled
 		}
-		return []*IEvent{{
-			Id: event.Id,
-		}}, event.Err
-	case <-time.After(timeout):
-		return nil, nil
-	case <-ctx.Done():
-		return nil, context.Canceled
-	}
+	}()
+	cancel()
+	return goextEvent, err
 }
 
 type IEnv struct {
@@ -144,9 +181,9 @@ type IEnv struct {
 // esi_wan_gohan/northbound/common/longpoll.go
 func watchOnce(ctx context.Context, env IEnv, timeout time.Duration) ([]*IEvent, error) {
 	childCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	return env.sync.Watch(childCtx, timeout)
+	ev, err := env.sync.Watch(childCtx, timeout)
+	cancel()
+	return ev, err
 }
 
 // esi_wan_gohan/northbound/common/longpoll.go
@@ -159,7 +196,10 @@ func LongPoll(ctx context.Context, env IEnv, timeout time.Duration) (bool, error
 			break
 		}
 
-		events, err := watchOnce(ctx, env, timeout)
+		events, err := func () ([]*IEvent, error) {
+			ev, err := watchOnce(ctx, env, timeout)
+			return ev, err
+		}()
 
 		if err == context.Canceled {
 			break
@@ -183,8 +223,13 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	cli, err := clientv3.New(
+		clientv3.Config{
+			Endpoints: []string{"localhost:2379"},
+		},
+	)
 	s := Sync{
-		client: clientv3.NewCtxClient(ctx),
+		client: cli,
 	}
 	defer s.client.Close()
 
@@ -192,6 +237,6 @@ func main() {
 		sync: &ISync{raw: s},
 	}
 
-	ok, err := LongPoll(ctx, env, time.Second * 10)
+	ok, err := LongPoll(ctx, env, time.Second * 20)
 	log.Println(ok, err)
 }
