@@ -51,7 +51,7 @@ type Request struct {
 // gohan/syncer/etcdv3/etcd.go
 func (s *Sync) watch(ctx context.Context, responseChan chan *Event) error {
 
-	childCtx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancel(ctx)
 	errorsCh := make(chan error, 1)
 	var wg syn.WaitGroup
 	wg.Add(1)
@@ -73,7 +73,7 @@ func (s *Sync) watch(ctx context.Context, responseChan chan *Event) error {
 							Value string
 						}{{ Key: string(ev.Kv.Key), Value: string(ev.Kv.Value)} } {
 							select {
-							case <-childCtx.Done():
+							case <-ctx.Done():
 								return
 							case responseChan <- &Event{
 								Key: string(kv.Key), 
@@ -95,7 +95,7 @@ func (s *Sync) watch(ctx context.Context, responseChan chan *Event) error {
 	}()
 
 	select {
-	case <-childCtx.Done():
+	case <-ctx.Done():
 		return nil
 	case err := <-errorsCh:
 		return err
