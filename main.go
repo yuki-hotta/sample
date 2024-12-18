@@ -72,14 +72,14 @@ func (s *Sync) watch(ctx context.Context, responseChan chan *Event) error {
 							Key string
 							Value string
 						}{{ Key: string(ev.Kv.Key), Value: string(ev.Kv.Value)} } {
+							event_ := &Event{
+								Key: string(kv.Key), 
+								Value: string(kv.Value),
+							}
 							select {
 							case <-ctx.Done():
 								return
-							case responseChan <- &Event{
-								Key: string(kv.Key), 
-								Value: string(kv.Value),
-							}:
-								return
+							case responseChan <- event_:
 							}
 						}
 					}()
@@ -176,7 +176,7 @@ func LongPoll(ctx context.Context, env IEnv, timeout time.Duration) (bool, error
 		}
 
 		events, err := watchOnce(ctx, env, timeout)
-
+		fmt.Println(events, err, ctx, env, timeout)
 		if err == context.Canceled {
 			break
 		}
@@ -213,6 +213,6 @@ func main() {
 		sync: &ISync{raw: s},
 	}
 
-	ok, err := LongPoll(ctx, env, time.Second * 20)
+	ok, err := LongPoll(ctx, env, time.Second * 40)
 	log.Println(ok, err)
 }
