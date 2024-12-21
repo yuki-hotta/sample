@@ -33,6 +33,7 @@ type Sync struct {
 type Event struct{
 	Key string
 	Value string
+	Revision int64
 	Err error
 }
 
@@ -71,10 +72,12 @@ func (s *Sync) watch(ctx context.Context, responseChan chan *Event) error {
 						for _, kv := range []*struct{ 
 							Key string
 							Value string
-						}{{ Key: string(ev.Kv.Key), Value: string(ev.Kv.Value)} } {
+							Revision int64
+						}{{ Key: string(ev.Kv.Key), Value: string(ev.Kv.Value), Revision: ev.Kv.ModRevision} } {
 							event_ := &Event{
 								Key: string(kv.Key), 
 								Value: string(kv.Value),
+								Revision: kv.Revision,
 							}
 							select {
 							case <-ctx.Done():
@@ -136,6 +139,7 @@ type ISync struct {
 type IEvent struct {
 	Key string
 	Value string
+	Revision int64
 }
 
 // gohan/extension/goplugin/sync.go
@@ -146,6 +150,7 @@ func (syn *ISync) Watch(ctx context.Context, timeout time.Duration) ([]*IEvent, 
 		return []*IEvent{{
 			Key: event.Key,
 			Value: event.Value,
+			Revision: event.Revision,
 		}}, event.Err
 	case <-time.After(timeout):
 		return nil, nil
